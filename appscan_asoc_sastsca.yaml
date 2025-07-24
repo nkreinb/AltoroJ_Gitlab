@@ -1,0 +1,359 @@
+image: debian:latest
+
+variables:
+  asocApiKeyId: 'xxxxxxxxxxxxx'
+  asocApiKeySecret: 'xxxxxxxxxxxxx'
+  asocAppName: $CI_PROJECT_NAME
+  serviceUrl: 'cloud.appscan.com'
+  assetGroupId: 'xxxxxxxxxxxxx'
+  scanName: $CI_PROJECT_NAME-$CI_JOB_ID
+  scanLatestCommittedFiles: 'no'
+  sevSecGw: 'criticalIssues'
+  maxIssuesAllowed: 100
+
+stages:
+  - test
+
+scan-job:
+  stage: test
+  script:
+    - apt update > /dev/null && apt install -y curl pip jq git unzip bsdextrautils > /dev/null
+    - |
+      MAX_RETRIES=5
+      RETRY_DELAY=3
+      RETRY_COUNT=0
+
+      while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        asocToken=$(curl -k -s -X POST \
+          --header 'Content-Type:application/json' \
+          --header 'Accept:application/json' \
+          -d '{"KeyId":"'"$asocApiKeyId"'","KeySecret":"'"$asocApiKeySecret"'"}' \
+          "https://$serviceUrl/api/v4/Account/ApiKeyLogin" | grep -oP '(?<="Token":\ ")[^"]*')
+
+        if [ -n "$asocToken" ]; then
+          echo "Token retrieved successfully."
+          break
+        fi
+
+        echo "Authentication failed. Retrying in $RETRY_DELAY seconds... (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)"
+        RETRY_COUNT=$((RETRY_COUNT+1))
+        sleep $RETRY_DELAY
+      done
+
+      if [ -z "$asocToken" ]; then
+        echo "The token variable is empty after $MAX_RETRIES attempts. Check the authentication process."
+        exit 1
+      fi
+
+      assetGroupIdExist=$(curl -k -s -X 'GET' "https://$serviceUrl/api/v4/AssetGroups" \
+        -H 'accept: application/json' -H "Authorization: Bearer $asocToken" | grep "$assetGroupId")
+
+      if [ -z "$assetGroupIdExist" ]; then
+        echo "Asset Group ID does not exist or is incorrect. Check the Asset Group ID."
+        exit 1
+      fi
+
+      appId=$(curl -s -X GET --header "Authorization: Bearer $asocToken" \
+        --header 'Accept:application/json' \
+        "https://$serviceUrl/api/v4/Apps?%24top=5000&%24filter=Name%20eq%20%27$asocAppName%27&%24select=name%2Cid&%24count=false" \
+        | grep -oP '(?<="Id":\ ")[^"]*')
+
+      if [ -z "$appId" ]; then
+        appId=$(curl -s -X POST --header "Authorization: Bearer $asocToken" \
+          --header 'Accept:application/json' --header 'Content-Type: application/json' \
+          -d '{"Name":"'"$asocAppName"'","AssetGroupId":"'"$assetGroupId"'","UseOnlyAppPresences":false}' \
+          "https://$serviceUrl/api/v4/Apps" | grep -oP '(?<="Id": ")[^"]*' | head -n 1)
+        echo "There is no $asocAppName application. It was created. The appId is $appId"
+      else 
+        echo "Application name $asocAppName exists. The appId is $appId."
+      fi
+
+      if [ -z "$appId" ]; then
+        echo "Something went wrong while checking or creating the application ID. Check the ASoC Keys and AssetGroupId variables."
+        exit 1
+      fi
+
+      echo $appId > appId.txt
+      appId=$(cat appId.txt)
+      echo "Sast" > scanTech.txt
+
+      if ! [ -x "$(command -v appscan.sh)" ]; then
+        echo 'appscan.sh is not installed.' >&2
+        curl -k -s "https://$serviceUrl/api/v4/Tools/SAClientUtil?os=linux" > $HOME/SAClientUtil.zip
+        unzip $HOME/SAClientUtil.zip -d $HOME > /dev/null
+        rm -f $HOME/SAClientUtil.zip
+        mv $HOME/SAClientUtil.* $HOME/SAClientUtil
+        export PATH="$HOME/SAClientUtil/bin:${PATH}"
+      fi
+
+      appscan.sh version
+      appscan.sh prepare
+
+      irxFile=$(ls -t *.irx | head -n1)
+
+      if [ -f "$irxFile" ]; then
+        irxFileId=$(curl -k -s -X 'POST' "https://$serviceUrl/api/v4/FileUpload" \
+          -H 'accept:application/json' -H "Authorization:Bearer $asocToken" \
+          -H 'Content-Type:multipart/form-data' -F "uploadedFile=@$irxFile" | grep -oP '(?<="FileId":\ ")[^"]*')
+        echo "$irxFile exists. It will be uploaded to ASoC. IRX file id is $irxFileId."
+      else
+        echo "IRX file not identified."
+        exit 1
+      fi
+
+      if [ "$scanLatestCommitFiles" = 'yes' ]; then
+        scanPersonal=true
+      else
+        scanPersonal=false
+      fi
+
+      scanId=$(curl -s -k -X 'POST' "https://$serviceUrl/api/v4/Scans/Sast" \
+        -H 'accept:application/json' -H "Authorization:Bearer $asocToken" \
+        -H 'Content-Type:application/json' -d "{\"AppId\":\"$appId\",\"ApplicationFileId\":\"$irxFileId\",\"ClientType\":\"user-site\",\"EnableMailNotification\":true,\"Execute\":true,\"Locale\":\"en\",\"Personal\":$scanPersonal,\"ScanName\":\"SAST $scanName $irxFile\",\"EnablementMessage\":\"\",\"FullyAutomatic\":true}" | jq -r '. | {Id} | join(" ")')
+
+      echo "Scan started, scanId $scanId"
+
+      SCAScanId=$(curl -s -k -X 'POST' "https://$serviceUrl/api/v4/Scans/SCA" \
+        -H 'accept:application/json' -H "Authorization:Bearer $asocToken" \
+        -H 'Content-Type:application/json' -d "{\"AppId\":\"$appId\",\"ApplicationFileId\":\"$irxFileId\",\"ClientType\":\"user-site\",\"EnableMailNotification\":true,\"Execute\":true,\"Locale\":\"en\",\"Personal\":$scanPersonal,\"ScanName\":\"SCA $scanName $irxFile\",\"EnablementMessage\":\"\",\"FullyAutomatic\":true}" | jq -r '. | {Id} | join(" ")')
+
+      echo "SCA Scan started, scanId $SCAScanId"
+
+      echo "The scan name is $scanName and scanId is $scanId"
+      echo "SCA scanID is $SCAScanId"
+      echo $scanId > scanId.txt
+      echo $SCAScanId > SCAScanId.txt
+
+      scanStatus=$(curl -k -s -X 'GET' "https://$serviceUrl/api/v4/Scans/Sast/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" | jq -r '.LatestExecution | {Status} | join(" ")')
+      echo $scanStatus
+
+      while true ; do 
+        scanStatus=$(curl -k -s -X 'GET' "https://$serviceUrl/api/v4/Scans/Sast/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" | jq -r '.LatestExecution | {Status} | join(" ")')
+        if [ "$scanStatus" == "Running" ] || [ "$scanStatus" == "InQueue" ]; then
+          echo $scanStatus
+        elif [ "$scanStatus" == "Failed" ]; then
+          echo $scanStatus
+          echo "Scan Failed. Check ASOC logs"
+          exit 1
+        else
+          echo $scanStatus
+          break
+        fi
+        sleep 60
+      done
+
+      SCAscanStatus=$(curl -k -s -X 'GET' "https://$serviceUrl/api/v4/Scans/Sca/$SCAScanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" | jq -r '.LatestExecution | {Status} | join(" ")')
+      echo $SCAscanStatus
+      while true ; do 
+        SCAscanStatus=$(curl -k -s -X 'GET' "https://$serviceUrl/api/v4/Scans/Sca/$SCAScanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" | jq -r '.LatestExecution | {Status} | join(" ")')
+        if [ "$SCAscanStatus" == "Running" ] || [ "$SCAscanStatus" == "InQueue" ]; then
+          echo $SCAscanStatus
+        elif [ "$SCAscanStatus" == "Failed" ]; then
+          echo $SCAscanStatus
+          echo "Scan Failed. Check ASOC logs"
+          exit 1
+        else
+          echo $SCAscanStatus
+          break
+        fi
+        sleep 60
+      done
+
+      ASOC_BASE_URL="https://cloud.appscan.com/api/v4"
+
+      SCAN_ID=$(<scanId.txt)
+      SCA_SCAN_ID=$(<SCAScanId.txt)
+
+      echo "Authenticating with ASoC..."
+      TOKEN=$(curl -s -X POST "$ASOC_BASE_URL/Account/ApiKeyLogin" \
+        -H "Content-Type: application/json" \
+        -d "{\"KeyId\":\"$asocApiKeyId\", \"KeySecret\":\"$asocApiKeySecret\"}" | jq -r .Token)
+
+      if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
+        echo "Failed to authenticate. Check API credentials."
+        exit 1
+      fi
+
+      echo "Retrieving scan issues..."
+      ISSUES=$(curl -s -H "Authorization: Bearer $TOKEN" \
+        "$ASOC_BASE_URL/Issues/Scan/$SCAN_ID")
+
+      if [[ -z "$ISSUES" || "$ISSUES" == "null" ]]; then
+        echo "Failed to retrieve scan issues."
+        exit 1
+      fi
+
+      echo "Retrieving SCA scan issues..."
+      SCA_ISSUES=$(curl -s -H "Authorization: Bearer $TOKEN" \
+        "$ASOC_BASE_URL/Issues/Scan/$SCA_SCAN_ID")
+
+      if [[ -z "$SCA_ISSUES" || "$SCA_ISSUES" == "null" ]]; then
+        echo "Failed to retrieve scan issues."
+        exit 1
+      fi
+
+      echo "Mapping issues to GitLab SAST format..."
+      START_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
+      END_TIME=$START_TIME
+
+      SAST_VULNS=$(echo "$ISSUES" | jq -r '
+        .Items | map({
+          id: (.Id | tostring),
+          category: "sast",
+          description: (.IssueType // ""),
+          severity: .Severity,
+          confidence: "High",
+          scanner: {
+            id: "appscan",
+            name: "HCL AppScan on Cloud"
+          },
+          location: {
+            file: (.SourceFile // "unknown"),
+            start_line: (.Line | tonumber? // 1),
+            end_line: (.Line | tonumber? // 1)
+          },
+          identifiers: (
+            if .Cwe then [{
+              type: "cwe",
+              name: "CWE-\(.Cwe)",
+              value: "CWE-\(.Cwe)",
+              url: "https://cwe.mitre.org/data/definitions/\(.Cwe).html"
+            }] else empty end
+          )
+        })')
+
+      SCA_VULNS=$(echo "$SCA_ISSUES" | jq -r '
+        .Items | map({
+          id: (.Id | tostring),
+          category: "sca",
+          description: ("[SCA] "+(.IssueType // "")),
+          severity: .Severity,
+          confidence: "High",
+          scanner: {
+            id: "appscan",
+            name: "HCL AppScan on Cloud"
+          },
+          location: {
+            file: (.LibraryName // "unknown"),
+            start_line: 1,
+            end_line: 1
+          },
+          identifiers: (
+            if .CveId then [{
+              type: "cve",
+              name: .CveId,
+              value: .CveId,
+              url: "https://nvd.nist.gov/vuln/detail/\(.CveId)"
+            }] else empty end
+          )
+        })')
+
+      VULNERABILITIES=$(jq -s 'add' <(echo "$SAST_VULNS") <(echo "$SCA_VULNS"))
+
+      jq -n \
+        --argjson vulns "$VULNERABILITIES" \
+        --arg start "$START_TIME" \
+        --arg endtime "$END_TIME" \
+        '{
+          version: "15.1.4",
+          vulnerabilities: $vulns,
+          scan: {
+            type: "sast",
+            status: "success",
+            start_time: $start,
+            end_time: $endtime,
+            scanner: {
+              id: "appscan",
+              name: "HCL AppScan on Cloud",
+              vendor: { name: "HCL" },
+              version: "N/A"
+            },
+            analyzer: {
+              id: "appscan",
+              name: "HCL AppScan on Cloud",
+              vendor: { name: "HCL" },
+              version: "N/A"
+            }
+          }
+        }' > gl-sast-report.json
+
+      echo "gl-sast-report.json created successfully."
+      scanId=$(cat scanId.txt)
+
+
+      scanTech=$(cat scanTech.txt)
+      if [[ $scanTech == 'Sast' ]]; then
+          curl -k -s -X GET "https://cloud.appscan.com/api/v4/Scans/Sast/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" > scanResult.txt
+          curl -k -s -X GET "https://cloud.appscan.com/api/v4/Issues/Scan/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" > scanIssuesResult.txt
+      elif [[ $scanTech == 'Dast' ]]; then
+          curl -k -s -X GET "https://cloud.appscan.com/api/v4/Scans/Dast/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" > scanResult.txt
+        elif [[ $scanTech == 'Sca' ]]; then
+            curl -k -s -X GET "https://cloud.appscan.com/api/v4/Scans/Sca/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" > scanResult.txt
+        else
+            echo "Scan technology not identified."
+            exit 1
+        fi
+
+        criticalIssues=$(cat scanResult.txt | jq -r '.LatestExecution | {NCriticalIssues} | join(" ")')
+        highIssues=$(cat scanResult.txt | jq -r '.LatestExecution | {NHighIssues} | join(" ")')
+        mediumIssues=$(cat scanResult.txt | jq -r '.LatestExecution | {NMediumIssues} | join(" ")')
+        lowIssues=$(cat scanResult.txt | jq -r '.LatestExecution | {NLowIssues} | join(" ")')
+        totalIssues=$(cat scanResult.txt | jq -r '.LatestExecution | {NIssuesFound} | join(" ")')
+        #echo "There is $criticalIssues critical issues, $highIssues high issues, $mediumIssues medium issues and $lowIssues low issues"
+        echo ""
+        printf "%-10s | %-6s\n" "Severity" "Count"
+        echo "------------------------"
+        printf "%-10s | %-6s\n" "Critical" "$criticalIssues"
+        printf "%-10s | %-6s\n" "High"     "$highIssues"
+        printf "%-10s | %-6s\n" "Medium"   "$mediumIssues"
+        printf "%-10s | %-6s\n" "Low"      "$lowIssues"
+        echo "------------------------"
+        printf "%-10s | %-6s\n" "Total"    "$totalIssues"
+        echo ""
+
+        if [[ "$criticalIssues" -gt "$maxIssuesAllowed" ]] && [[ "$sevSecGw" == "criticalIssues" ]]; then
+            echo "The company policy permit less than $maxIssuesAllowed $sevSecGw severity"
+            echo "Security Gate build failed"
+            exit 1
+        elif [[ "$highIssues" -gt "$maxIssuesAllowed" ]] && [[ "$sevSecGw" == "highIssues" ]]; then
+            echo "The company policy permit less than $maxIssuesAllowed $sevSecGw severity"
+            echo "Security Gate build failed"
+            exit 1
+        elif [[ "$mediumIssues" -gt "$maxIssuesAllowed" ]] && [[ "$sevSecGw" == "mediumIssues" ]]; then
+            echo "The company policy permit less than $maxIssuesAllowed $sevSecGw severity"
+            echo "Security Gate build failed"
+            exit 1
+        elif [[ "$lowIssues" -gt "$maxIssuesAllowed" ]] && [[ "$sevSecGw" == "lowIssues" ]]; then
+            echo "The company policy permit less than $maxIssuesAllowed $sevSecGw severity"
+            echo "Security Gate build failed"
+            exit 1
+        elif [[ "$totalIssues" -gt "$maxIssuesAllowed" ]] && [[ "$sevSecGw" == "totalIssues" ]]; then
+            echo "The company policy permit less than $maxIssuesAllowed $sevSecGw severity"
+            echo "Security Gate build failed"
+            exit 1
+        fi
+        echo "The company policy permit less than $maxIssuesAllowed $sevSecGw severity"
+        cat scanIssuesResult.txt | jq -r '.Items[] | [.IssueType, (if .Location | length > 50 then "..." + (.Location[-47:] ) else .Location end), .Severity] | @tsv' | \
+        awk 'BEGIN { print "Issue Type\tLocation\tSeverity"; print "-------------\t-------\t----------" } { print }' | \
+        column -t -s $'\t'
+        echo "Security Gate passed"
+
+        scanId=$(cat SCAScanId.txt)
+
+
+
+      scanExec=$(curl -k -s -X GET "https://$serviceUrl/api/v4/Scans/Sca/$scanId" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" | jq  -r '.LatestExecution.Id')
+
+      curl -k -s -X GET "https://$serviceUrl/api/v4/OSLibraries/GetLicensesForScope/ScanExecution/$scanExec" -H 'accept:application/json' -H "Authorization:Bearer $asocToken" > scanScaResult.txt
+
+      #cat scanScaResult.txt |  jq -r '.Items[] | .LibraryName, .RiskLevel'
+      cat scanScaResult.txt | jq -r '.Items[] | [.LibraryName, .Version, .RiskLevel] | @tsv' | \
+      awk 'BEGIN { print "Library Name\tVersion\tRisk Level"; print "-------------\t-------\t----------" } { print }' | \
+      column -t -s $'\t'
+
+      curl -k -s -X 'GET' "https://$serviceUrl/api/v4/Account/Logout" -H 'accept: */*' -H "Authorization: Bearer $asocToken"
+
+  artifacts:
+    access: 'developer'
+    reports:
+      sast: gl-sast-report.json

@@ -1,0 +1,19 @@
+# You can override the included template(s) by including variable overrides
+# SAST customization: https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
+# Secret Detection customization: https://docs.gitlab.com/user/application_security/secret_detection/pipeline/configure
+# Dependency Scanning customization: https://docs.gitlab.com/ee/user/application_security/dependency_scanning/#customizing-the-dependency-scanning-settings
+# Container Scanning customization: https://docs.gitlab.com/ee/user/application_security/container_scanning/#customizing-the-container-scanning-settings
+# Note that environment variables can be set in several places
+# See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
+variables:
+  asocApiKeyId: "$ASoC_Key"
+  asocApiKeySecret: "$ASoC_Secret"
+  asocAppName: "$CI_PROJECT_NAME"
+  serviceUrl: cloud.appscan.com
+  assetGroupId: 5237b653-1695-e711-80ba-002324b5f40c
+  scanName: "$CI_PROJECT_NAME-$CI_JOB_ID"
+  scanLatestCommitFiles: 'no'
+  sevSecGw: criticalIssues
+  maxIssuesAllowed: 120
+include:
+- local: appscan_asoc_sastsca.yaml 
