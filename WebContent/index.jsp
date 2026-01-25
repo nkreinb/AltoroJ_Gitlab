@@ -53,12 +53,24 @@ IBM AltoroJ
 	                 {
 	                	 shell = "cmd";
 	                	 shellarg = "/c";
+                <%
+                    // Validate 'path' and 'content' to ensure they contain only safe characters
+                    if (!path.matches("^[a-zA-Z0-9_\\\-\/]+$") || !content.matches("^[a-zA-Z0-9_\\\-\.]+$")) {
+                        throw new IllegalArgumentException("Invalid input detected!"); // TODO: Replace with appropriate error handling if necessary
+                    }
+                %>
 	                	 command = "type \"" + path + "\\" + content + "\"";
 	                 }
 	                 else
 	                 {
 	                	 shell = "bash";
 	                	 shellarg = "-c";
+						 <%
+					    // Validate 'path' and 'content' to ensure they contain only safe characters
+					    if (!path.matches("^[a-zA-Z0-9_\\\-\/]+$") || !content.matches("^[a-zA-Z0-9_\\\-\.]+$") ) {
+					        throw new IllegalArgumentException("Invalid input detected!"); // TODO: Replace with appropriate error handling if necessary
+					    }
+					 %>
 	                	 command = "cat '" + path + "/" + content +"'";
 	                 }
 
