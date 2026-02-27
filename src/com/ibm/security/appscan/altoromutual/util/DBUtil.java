@@ -23,6 +23,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 
@@ -467,8 +468,10 @@ public class DBUtil {
 	public static String addAccount(String username, String acctType) {
 		try {
 			Connection connection = getConnection();
-			Statement statement = connection.createStatement();
-			statement.execute("INSERT INTO ACCOUNTS (USERID,ACCOUNT_NAME,BALANCE) VALUES ('"+username+"','"+acctType+"', 0)");
+			PreparedStatement ps = connection.prepareStatement("INSERT INTO ACCOUNTS (USERID, ACCOUNT_NAME, BALANCE) VALUES (?, ?, 0)");
+			ps.setString(1, username);
+			ps.setString(2, acctType);
+			ps.executeUpdate();
 			return null;
 		} catch (SQLException e){
 			return e.toString();
