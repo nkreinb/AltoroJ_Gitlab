@@ -23,6 +23,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 
@@ -214,9 +215,13 @@ public class DBUtil {
 			return false; 
 		
 		Connection connection = getConnection();
-		Statement statement = connection.createStatement();
-		
-		ResultSet resultSet =statement.executeQuery("SELECT COUNT(*)FROM PEOPLE WHERE USER_ID = '"+ user +"' AND PASSWORD='" + password + "'"); /* BAD - user input should always be sanitized */
+		// Using PreparedStatement to prevent SQL injection
+		PreparedStatement preparedStatement = connection.prepareStatement("SELECT COUNT(*) FROM PEOPLE WHERE USER_ID = ? AND PASSWORD = ?");
+		preparedStatement.setString(1, user);
+		preparedStatement.setString(2, password);
+		ResultSet resultSet = preparedStatement.executeQuery();
+		// Call site updated to use PreparedStatement with proper parameter binding; subsequent logic remains unchanged
+		// Using the ResultSet returned from PreparedStatement; subsequent logic remains unchanged
 		
 		if (resultSet.next()){
 			
